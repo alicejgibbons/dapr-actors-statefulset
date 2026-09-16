@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ActorClient/ActorClient.csproj" />
+    <Project Path="src/ActorContracts/ActorContracts.csproj" />
+    <Project Path="src/ActorHost/ActorHost.csproj" />
+  </Folder>
+</Solution>

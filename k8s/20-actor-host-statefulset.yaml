@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: actor-host-headless
+  namespace: actors-demo
+  labels:
+    app: actor-host
+spec:
+  clusterIP: None
+  selector:
+    app: actor-host
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: actor-host
+  namespace: actors-demo
+  labels:
+    app: actor-host
+spec:
+  serviceName: actor-host-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: actor-host
+  template:
+    metadata:
+      labels:
+        app: actor-host
+      annotations:
+        dapr.io/enabled: "true"
+        # Shared across every replica on purpose -- each pod pins its own,
+        # single dynamically-named actor type in application code instead
+        # (see PodIdentity.cs), so placement still routes each type to
+        # exactly one pod regardless of app-id.
+        dapr.io/app-id: "actor-host"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+        - name: actor-host
+          image: dapr-actors-statefulset/actor-host:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: ACTOR_TYPE_PREFIX
+              value: "WorkerActor"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15

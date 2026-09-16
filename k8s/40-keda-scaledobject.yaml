@@ -1,0 +1,28 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: actor-host-scaledobject
+  namespace: actors-demo
+spec:
+  scaleTargetRef:
+    name: actor-host
+    kind: StatefulSet
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  # With minReplicaCount > 0, KEDA delegates polling to the standard HPA
+  # sync loop, so pollingInterval/cooldownPeriod (scale-from/to-zero knobs)
+  # don't apply here. Shorten the HPA's own scale-down stabilization window
+  # instead, so this demo doesn't take the default 5 minutes to observe.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 30
+        scaleUp:
+          stabilizationWindowSeconds: 0
+  triggers:
+    - type: metrics-api
+      metadata:
+        url: "http://actor-client.actors-demo.svc.cluster.local:8080/metrics/desired-instances"
+        valueLocation: "value"
+        targetValue: "1"

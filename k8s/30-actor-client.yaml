@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: actor-client
+  namespace: actors-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: actor-client-pod-reader
+  namespace: actors-demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: actor-client-pod-reader
+  namespace: actors-demo
+subjects:
+  - kind: ServiceAccount
+    name: actor-client
+    namespace: actors-demo
+roleRef:
+  kind: Role
+  name: actor-client-pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: actor-client
+  namespace: actors-demo
+  labels:
+    app: actor-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: actor-client
+  template:
+    metadata:
+      labels:
+        app: actor-client
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "actor-client"
+        dapr.io/app-port: "8080"
+    spec:
+      serviceAccountName: actor-client
+      containers:
+        - name: actor-client
+          image: dapr-actors-statefulset/actor-client:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: ACTOR_TYPE_PREFIX
+              value: "WorkerActor"
+            - name: ACTOR_HOST_LABEL_SELECTOR
+              value: "app=actor-host"
+            - name: WATCH_POLL_SECONDS
+              value: "5"
+            - name: INVOKE_INTERVAL_SECONDS
+              value: "5"
+            - name: DEMAND_GENERATOR_ENABLED
+              value: "true"
+            - name: DEMAND_GENERATOR_INTERVAL_SECONDS
+              value: "20"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: actor-client
+  namespace: actors-demo
+  labels:
+    app: actor-client
+spec:
+  selector:
+    app: actor-client
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+k8s/
+scripts/
+*.md
