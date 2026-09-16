@@ -74,11 +74,27 @@ that didn't exist before; nothing else needs to be told about it.
 
 ### How the client discovers new actor types
 
-`StatefulSetWatcher` (`src/ActorClient/Services/StatefulSetWatcher.cs`) polls
-the Kubernetes API every 5s for Ready pods matching `app=actor-host`, derives
-each one's actor type using the same `WorkerActor-<ordinal>` convention as
-the host, and reconciles that into `JobQueue`'s known-types map — this map's
-size **is** "the number of pods in the StatefulSet" the client is tracking.
+`StatefulSetWatcher` (`src/ActorClient/Services/StatefulSetWatcher.cs`) is
+event-driven, not polling: it registers a callback on a Kubernetes
+**informer** (`IResourceInformer<V1Pod>`, from the
+[`KubernetesClient.Informer`](https://github.com/IvanJosipovic/KubernetesClient.Informer)
+package, wired up in `Program.cs`) that does an initial list-and-cache of
+Pods in the `actors-demo` namespace, then streams `Added`/`Modified`/`Deleted`
+watch events as they happen — no fixed poll interval, a new or removed pod is
+reflected within milliseconds. For each event, the callback filters to
+`app=actor-host` pods (the library only supports field selectors, not label
+selectors, so this filtering is done client-side), checks the pod is Ready,
+derives its actor type using the same `WorkerActor-<ordinal>` convention as
+the host, and calls `JobQueue.MarkPodKnown`/`MarkPodGone` — `JobQueue`'s
+known-types map size **is** "the number of pods in the StatefulSet" the
+client is tracking.
+
+The library relists automatically if the watch stream drops or its
+resourceVersion expires (410 Gone), but has no built-in *periodic* full
+resync the way client-go informers do — so `StatefulSetWatcher` also runs
+its own defensive full re-list every `FULL_RESYNC_INTERVAL_SECONDS` (default
+300s) as a belt-and-suspenders backstop, logging a warning if it ever finds
+drift the informer's events missed (in testing, it never has).
 
 ### The job queue, and why finishing a job scales its pod back down
 
@@ -121,7 +137,8 @@ KEDA, in both directions:
    pod self-registers its own actor type as described above; when demand
    drops because jobs finished, the *highest*-ordinal pod(s) are removed
    (that's how StatefulSets always scale down), and the client's watcher
-   drops the corresponding actor type(s) from its known set on its next poll.
+   drops the corresponding actor type(s) from its known set via the
+   informer's `Deleted` event, essentially immediately.
 4. `minReplicaCount: 1` means it never goes below one pod — there's always
    an idle worker ready to pick up the next job immediately — and
    `scaleDown.stabilizationWindowSeconds: 30` keeps the down-scale quick
@@ -152,8 +169,8 @@ was exercised twice from a clean cluster and confirmed:
   (`redis-cli keys '*'` → `actor-host||WorkerActor-0||job-0||invocationCount`).
 - Sustained job submission (one every 15s, each running 20-35s) scaled
   `actor-host` from 1 up to 8 replicas; each new pod (`actor-host-1` …
-  `actor-host-7`) was discovered and got its first job within one poll cycle
-  (≤5s) of becoming Ready.
+  `actor-host-7`) was discovered via the informer's `Added` event and got
+  its first job within seconds of becoming Ready.
 - **Scale-down driven purely by job completion, with no manual trigger**,
   was also confirmed directly: with 8 replicas up, `JobQueue` was observed
   freeing an ordinal's slot the instant each `DoWorkAsync` call returned
@@ -164,8 +181,22 @@ was exercised twice from a clean cluster and confirmed:
   minute, settling exactly at `minReplicaCount: 1` (`keda-hpa-actor-host-
   scaledobject` targets `0/1 (avg)`, `REPLICAS 1`) once
   `desiredInstanceCount` hit 0 — matching `scaleDown.stabilizationWindowSeconds:
-  30`. The client's `/status` stopped listing each removed ordinal's actor
-  type on its next 5s poll.
+  30`.
+- **The Kubernetes informer was validated separately**, including a throwaway
+  spike project, before wiring it into the app. Two things turned out not to
+  be as advertised: (1) `KubernetesClient.Informer`'s `RegisterResourceInformer<T>()`
+  DI convenience method has no way to pass a namespace (always cluster-wide),
+  incompatible with this app's namespace-scoped RBAC — worked around by
+  constructing `ResourceInformer<V1Pod>` directly with `@namespace` in
+  `Program.cs`; (2) despite going through the generic `CustomObjects` API
+  path (normally used for CRDs living under `/apis/{group}/{version}/...`),
+  it was confirmed to work correctly against the core `V1Pod` type (group
+  `""`), against this cluster and with the same namespace-scoped
+  ServiceAccount token the deployed client uses. In the running deployment,
+  removing pods was picked up via real `Deleted` events (log:
+  `Informer: actor-host-5 is gone/not Ready; dropping its actor type`, and
+  four more for ordinals 4 down to 1) within the same scale-down cycle
+  above, with no polling involved.
 
 ## Prerequisites
 
@@ -251,9 +282,10 @@ applies the manifests in `k8s/`.
    ordinal's slot, `desiredInstanceCount` drops, and — once nothing is left
    pending or running — KEDA scales `actor-host` back down to 1 replica
    within `scaleDown.stabilizationWindowSeconds: 30` (`k8s/40-keda-
-   scaledobject.yaml`). The client's `/status` stops listing the removed
-   actor types on its next 5s poll. If you want a quiet cluster to watch
-   this in isolation, pause the synthetic generator first:
+   scaledobject.yaml`). The client's `/status` stops listing each removed
+   actor type almost immediately, via the informer's `Deleted` event. If you
+   want a quiet cluster to watch this in isolation, pause the synthetic
+   generator first:
 
    ```bash
    kubectl -n actors-demo set env deployment/actor-client JOB_GENERATOR_ENABLED=false

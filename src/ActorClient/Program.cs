@@ -1,5 +1,7 @@
 using ActorClient.Services;
 using k8s;
+using k8s.Models;
+using KubernetesClient.Informer.Client;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,6 +22,18 @@ builder.Services.AddSingleton<IKubernetes>(_ =>
 
     return new Kubernetes(config);
 });
+
+// KubernetesClient.Informer's RegisterResourceInformer<T>() convenience extension has no way
+// to pass a namespace (it always watches cluster-wide), which doesn't fit our namespace-scoped
+// RBAC -- so this constructs the informer directly instead, scoped to POD_NAMESPACE.
+var podNamespace = builder.Configuration["POD_NAMESPACE"] ?? "actors-demo";
+builder.Services.AddSingleton<IResourceInformer<V1Pod>>(sp => new ResourceInformer<V1Pod>(
+    sp.GetRequiredService<IKubernetes>(),
+    sp.GetRequiredService<IHostApplicationLifetime>(),
+    sp.GetRequiredService<ILogger<ResourceInformer<V1Pod>>>(),
+    selector: null,
+    @namespace: podNamespace));
+builder.Services.AddHostedService(sp => (ResourceInformer<V1Pod>)sp.GetRequiredService<IResourceInformer<V1Pod>>());
 
 builder.Services.AddHostedService<StatefulSetWatcher>();
 builder.Services.AddHostedService<ActorInvokerWorker>();

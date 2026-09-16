@@ -68,8 +68,8 @@ spec:
               value: "WorkerActor"
             - name: ACTOR_HOST_LABEL_SELECTOR
               value: "app=actor-host"
-            - name: WATCH_POLL_SECONDS
-              value: "5"
+            - name: FULL_RESYNC_INTERVAL_SECONDS
+              value: "300"
             - name: ASSIGN_INTERVAL_SECONDS
               value: "2"
             - name: JOB_GENERATOR_ENABLED

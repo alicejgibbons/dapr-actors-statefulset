@@ -16,9 +16,12 @@ public sealed record ActorInvocationJob(int Ordinal, string ActorTypeName, Job J
 
 /// <summary>
 /// The client's single job queue. It:
-///  1. Tracks the set of pods currently in the actor-host StatefulSet (kept in
-///     sync by <see cref="StatefulSetWatcher"/>) -- PodCount is exactly "the
-///     number of pods in the StatefulSet" the client currently knows about.
+///  1. Tracks the set of pods currently in the actor-host StatefulSet -- kept
+///     in sync by <see cref="StatefulSetWatcher"/>, primarily event-driven via
+///     a Kubernetes informer (<see cref="MarkPodKnown"/>/<see cref="MarkPodGone"/>
+///     per pod), with <see cref="SyncKnownPods"/> as a periodic defensive full
+///     reconciliation. PodCount is exactly "the number of pods in the
+///     StatefulSet" the client currently knows about.
 ///  2. Queues real jobs and assigns each to an idle known actor type/pod.
 ///     DesiredInstanceCount is simply "jobs still pending or running" -- when
 ///     a job finishes (see <see cref="CompleteJob"/>), its slot is freed
@@ -46,7 +49,44 @@ public sealed class JobQueue
     /// StatefulSet's minReplicaCount then floors actual replicas at 1 regardless.</summary>
     public int DesiredInstanceCount => PendingJobCount + ActiveJobCount;
 
-    /// <summary>Reconciles the known-pods map against what was just observed in Kubernetes.</summary>
+    /// <summary>
+    /// Marks a single ordinal as known/Ready -- the event-driven fast path, called from the
+    /// informer's per-pod callback. Returns true if this ordinal wasn't already known.
+    /// </summary>
+    public bool MarkPodKnown(int ordinal, string actorType)
+    {
+        var isNew = !_knownActorTypesByOrdinal.ContainsKey(ordinal);
+        _knownActorTypesByOrdinal[ordinal] = actorType;
+        return isNew;
+    }
+
+    /// <summary>
+    /// Marks a single ordinal as gone/not-Ready -- the event-driven fast path. Requeues any job
+    /// that was actively running on it instead of losing it. Returns true if it was known.
+    /// </summary>
+    public bool MarkPodGone(int ordinal)
+    {
+        if (!_knownActorTypesByOrdinal.TryRemove(ordinal, out _))
+        {
+            return false;
+        }
+
+        // The pod backing this ordinal disappeared mid-job (e.g. it was evicted) --
+        // put the job back in the queue instead of losing it.
+        if (_activeJobsByOrdinal.TryRemove(ordinal, out var orphanedJob))
+        {
+            orphanedJob.Status = JobStatus.Pending;
+            orphanedJob.AssignedOrdinal = null;
+            _pendingJobs.Enqueue(orphanedJob);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Defensive periodic full reconciliation, run on a timer alongside the informer's
+    /// event-driven updates in case a watch event was somehow missed.
+    /// </summary>
     public (IReadOnlyList<int> added, IReadOnlyList<int> removed) SyncKnownPods(
         IReadOnlyDictionary<int, string> observedOrdinalToActorType)
     {
@@ -55,28 +95,17 @@ public sealed class JobQueue
 
         foreach (var (ordinal, actorType) in observedOrdinalToActorType)
         {
-            if (_knownActorTypesByOrdinal.TryAdd(ordinal, actorType))
+            if (MarkPodKnown(ordinal, actorType))
             {
                 added.Add(ordinal);
             }
         }
 
-        foreach (var ordinal in _knownActorTypesByOrdinal.Keys)
+        foreach (var ordinal in _knownActorTypesByOrdinal.Keys.ToArray())
         {
-            if (observedOrdinalToActorType.ContainsKey(ordinal) || !_knownActorTypesByOrdinal.TryRemove(ordinal, out _))
+            if (!observedOrdinalToActorType.ContainsKey(ordinal) && MarkPodGone(ordinal))
             {
-                continue;
-            }
-
-            removed.Add(ordinal);
-
-            // The pod backing this ordinal disappeared mid-job (e.g. it was evicted) --
-            // put the job back in the queue instead of losing it.
-            if (_activeJobsByOrdinal.TryRemove(ordinal, out var orphanedJob))
-            {
-                orphanedJob.Status = JobStatus.Pending;
-                orphanedJob.AssignedOrdinal = null;
-                _pendingJobs.Enqueue(orphanedJob);
+                removed.Add(ordinal);
             }
         }
 
