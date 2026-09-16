@@ -23,7 +23,7 @@ builder.Services.AddSingleton<IKubernetes>(_ =>
 
 builder.Services.AddHostedService<StatefulSetWatcher>();
 builder.Services.AddHostedService<ActorInvokerWorker>();
-builder.Services.AddHostedService<DemandGeneratorWorker>();
+builder.Services.AddHostedService<JobGeneratorWorker>();
 
 var app = builder.Build();
 
@@ -32,21 +32,17 @@ app.MapGet("/healthz", () => Results.Ok(new { status = "ok" }));
 app.MapGet("/metrics/desired-instances", (JobQueue jobQueue) =>
     Results.Ok(new { value = jobQueue.DesiredInstanceCount }));
 
-app.MapPost("/demand/add", (JobQueue jobQueue, int by = 1) =>
+app.MapPost("/jobs", (JobQueue jobQueue, int durationMs = 25_000) =>
 {
-    var updated = jobQueue.IncreaseDemand(by);
-    return Results.Ok(new { desiredInstanceCount = updated });
-});
-
-app.MapPost("/demand/reset", (JobQueue jobQueue) =>
-{
-    var updated = jobQueue.ResetDemand();
-    return Results.Ok(new { desiredInstanceCount = updated });
+    var job = jobQueue.Submit(durationMs);
+    return Results.Ok(new { jobId = job.JobId, durationMs, desiredInstanceCount = jobQueue.DesiredInstanceCount });
 });
 
 app.MapGet("/status", (JobQueue jobQueue) => Results.Ok(new
 {
     podCount = jobQueue.PodCount,
+    pendingJobCount = jobQueue.PendingJobCount,
+    activeJobCount = jobQueue.ActiveJobCount,
     desiredInstanceCount = jobQueue.DesiredInstanceCount,
     knownActorTypes = jobQueue.KnownActorTypes,
 }));

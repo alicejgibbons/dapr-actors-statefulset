@@ -70,12 +70,16 @@ spec:
               value: "app=actor-host"
             - name: WATCH_POLL_SECONDS
               value: "5"
-            - name: INVOKE_INTERVAL_SECONDS
-              value: "5"
-            - name: DEMAND_GENERATOR_ENABLED
+            - name: ASSIGN_INTERVAL_SECONDS
+              value: "2"
+            - name: JOB_GENERATOR_ENABLED
               value: "true"
-            - name: DEMAND_GENERATOR_INTERVAL_SECONDS
-              value: "20"
+            - name: JOB_GENERATOR_INTERVAL_SECONDS
+              value: "15"
+            - name: JOB_DURATION_MS_MIN
+              value: "20000"
+            - name: JOB_DURATION_MS_MAX
+              value: "35000"
           resources:
             requests:
               cpu: 50m

@@ -5,10 +5,12 @@ using Dapr.Actors.Client;
 namespace ActorClient.Services;
 
 /// <summary>
-/// The single actor client. Every few seconds it enqueues one invocation job
-/// per currently-known actor type/pod, then drains the queue and calls
-/// DoWorkAsync on each through a Dapr actor proxy -- proving that one client
-/// can reach every distinct actor type hosted across the StatefulSet.
+/// The single actor client's dispatch loop. Every couple of seconds it asks
+/// <see cref="JobQueue"/> to assign any pending jobs to idle, currently-known
+/// actor types/pods, then fires off DoWorkAsync for each newly-assigned job
+/// concurrently. When a call returns, the job's slot is freed immediately --
+/// that's what drops JobQueue.DesiredInstanceCount and lets KEDA scale the
+/// corresponding pod back down once its job is done.
 /// </summary>
 public sealed class ActorInvokerWorker(
     JobQueue jobQueue,
@@ -17,48 +19,47 @@ public sealed class ActorInvokerWorker(
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var invokeIntervalSeconds = int.TryParse(configuration["INVOKE_INTERVAL_SECONDS"], out var s) ? s : 5;
+        var assignIntervalSeconds = int.TryParse(configuration["ASSIGN_INTERVAL_SECONDS"], out var s) ? s : 2;
 
-        var producer = ProduceJobsAsync(invokeIntervalSeconds, stoppingToken);
-        var consumer = ConsumeJobsAsync(stoppingToken);
-
-        await Task.WhenAll(producer, consumer);
-    }
-
-    private async Task ProduceJobsAsync(int invokeIntervalSeconds, CancellationToken stoppingToken)
-    {
         while (!stoppingToken.IsCancellationRequested)
         {
-            foreach (var (ordinal, actorType) in jobQueue.KnownActorTypes)
+            foreach (var assignment in jobQueue.AssignPendingJobs())
             {
-                jobQueue.TryEnqueue(new ActorInvocationJob(ordinal, actorType));
+                _ = RunJobAsync(assignment, stoppingToken);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(invokeIntervalSeconds), stoppingToken);
+            await Task.Delay(TimeSpan.FromSeconds(assignIntervalSeconds), stoppingToken);
         }
     }
 
-    private async Task ConsumeJobsAsync(CancellationToken stoppingToken)
+    private async Task RunJobAsync(ActorInvocationJob assignment, CancellationToken stoppingToken)
     {
-        await foreach (var job in jobQueue.DequeueAllAsync(stoppingToken))
+        var succeeded = false;
+        try
         {
-            try
-            {
-                var actorId = new ActorId($"job-{job.Ordinal}");
-                var proxy = ActorProxy.Create<IWorkerActor>(actorId, job.ActorTypeName);
+            var actorId = new ActorId($"job-{assignment.Ordinal}");
+            var proxy = ActorProxy.Create<IWorkerActor>(actorId, assignment.ActorTypeName);
 
-                var jobId = Guid.NewGuid().ToString("N")[..8];
-                var result = await proxy.DoWorkAsync(new WorkItem(jobId));
+            logger.LogInformation(
+                "Dispatching job {JobId} ({DurationMs}ms) to {ActorType}/{ActorId}",
+                assignment.Job.JobId, assignment.Job.SimulatedDurationMs, assignment.ActorTypeName, actorId);
 
-                logger.LogInformation(
-                    "Invoked {ActorType}/{ActorId} on pod {PodName} -> invocationCount={Count}",
-                    result.ActorType, result.ActorId, result.PodName, result.InvocationCount);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to invoke actor type {ActorType} (ordinal {Ordinal})",
-                    job.ActorTypeName, job.Ordinal);
-            }
+            var result = await proxy.DoWorkAsync(new WorkItem(assignment.Job.JobId, assignment.Job.SimulatedDurationMs));
+
+            logger.LogInformation(
+                "Job {JobId} finished on {ActorType}/{ActorId} (pod {PodName}) -> invocationCount={Count}",
+                result.JobId, result.ActorType, result.ActorId, result.PodName, result.InvocationCount);
+
+            succeeded = true;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Job {JobId} failed on actor type {ActorType} (ordinal {Ordinal})",
+                assignment.Job.JobId, assignment.ActorTypeName, assignment.Ordinal);
+        }
+        finally
+        {
+            jobQueue.CompleteJob(assignment.Ordinal, succeeded);
         }
     }
 }
